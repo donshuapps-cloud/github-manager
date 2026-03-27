@@ -1,10 +1,13 @@
 # GitHub Repository Manager - Documentación del Módulo
+
 ## Descripción
 Sistema modular bash para gestión de repositorios GitHub con interfaz interactiva.
+
 ## Autor
 - **Nombre:** Donshu
 - **Email:** donshu.apps@gmail.com
 - **GitHub:** https://github.com/donshuapps-cloud
+
 ## Estructura del Módulo
 ```
 github-manager/
@@ -49,6 +52,7 @@ cd /ruta/del/proyecto
 ./github-manager/github-manager.sh
 ```
 ## Configuración
+
 ### Variables de entorno
 | Variable | Descripción |
 |----------|-------------|
@@ -56,8 +60,10 @@ cd /ruta/del/proyecto
 | `GITHUB_USER` | Nombre de usuario de GitHub |
 | `LANG` | Idioma: `es` o `en` |
 | `DEBUG` | Activar modo debug: `1` |
+
 ### Autenticación SSH (recomendado)
 ```bash
+
 # Generar clave SSH
 ssh-keygen -t ed25519 -C "tu@email.com"
 # Agregar a GitHub
@@ -65,9 +71,12 @@ cat ~/.ssh/id_ed25519.pub
 # Copiar y pegar en: https://github.com/settings/ssh/new
 # Verificar conexión
 ssh -T git@github.com
+
 ```
+
 ## Flujo de Trabajo
 ```
+
         ┌─────────────┐
         │   INICIO    │
         └──────┬──────┘
@@ -101,6 +110,7 @@ ssh -T git@github.com
 │    Menú     │
 └─────────────┘
 ```
+
 ## Próximos Módulos (Iteración 2+)
 - Módulo 3: Subir cambios con auto-descripción
 - Módulo 4: Clonar repositorio existente
@@ -113,7 +123,9 @@ ssh -T git@github.com
 - Módulo 11: Ver historial de commits
 - Módulo 12: Configurar .gitignore personalizado
 - Módulo 13: Generar documentación automática
+
 ## Licencia
 MIT
+
 ## Soporte
 Para soporte o consultas: donshu.apps@gmail.com

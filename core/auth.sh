@@ -6,22 +6,61 @@
 check_ssh() {
     log_info "$MSG_SSH_CHECK"
     # Verificar que existe clave SSH
-    if [ ! -f "${SSH_KEY_PATH}" ] && [ ! -f "${HOME}/.ssh/id_rsa" ]; then
-        log_warning "No se encontraron claves SSH"
+    if [ ! -f "${SSH_KEY_PATH}" ] && [ ! -f "${HOME}/.ssh/id_rsa" ] && [ ! -f "${HOME}/.ssh/id_ed25519" ]; then
+        log_warning "No se encontraron claves SSH en ~/.ssh/"
+        log_info "   Buscado: id_ed25519, id_rsa"
         return 1
     fi
-    # Probar conexión con GitHub
-    if ssh -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
+    # Probar conexión con GitHub - Capturar tanto stdout como stderr
+    local ssh_output
+    ssh_output=$(ssh -T git@github.com 2>&1)
+    local ssh_exit_code=$?
+    # Depuración
+    log_debug "SSH exit code: $ssh_exit_code"
+    log_debug "SSH output: $ssh_output"
+    # Verificar diferentes formas de éxito
+    if [ $ssh_exit_code -eq 0 ]; then
+        # Éxito por código de salida
         log_success "$MSG_SSH_OK"
         export GIT_REMOTE_PREFIX="git@github.com:"
         export USE_SSH=true
         return 0
-    elif ssh -T git@github.com 2>&1 | grep -q "permission denied"; then
-        log_error "Permiso denegado. La clave SSH no está agregada a GitHub"
-        echo "$MSG_SSH_ADD_KEY"
-        return 1
+    elif echo "$ssh_output" | grep -q "successfully authenticated"; then
+        # Éxito por mensaje
+        log_success "$MSG_SSH_OK"
+        export GIT_REMOTE_PREFIX="git@github.com:"
+        export USE_SSH=true
+        return 0
+    elif echo "$ssh_output" | grep -q "You've successfully authenticated"; then
+        # Éxito por mensaje alternativo
+        log_success "$MSG_SSH_OK"
+        export GIT_REMOTE_PREFIX="git@github.com:"
+        export USE_SSH=true
+        return 0
+    elif echo "$ssh_output" | grep -q "Hi.*! You've successfully authenticated"; then
+        # Éxito por mensaje con nombre de usuario
+        log_success "$MSG_SSH_OK"
+        export GIT_REMOTE_PREFIX="git@github.com:"
+        export USE_SSH=true
+        # Extraer nombre de usuario si es posible
+        local github_user
+        github_user=$(echo "$ssh_output" | grep -o "Hi [^!]*" | cut -d' ' -f2)
+        if [ -n "$github_user" ] && [ -z "${GITHUB_USER:-}" ]; then
+            GITHUB_USER="$github_user"
+            log_info "Usuario GitHub detectado: $GITHUB_USER"
+        fi
+        return 0
     else
-        log_error "Error al conectar con GitHub via SSH"
+        # Error de autenticación
+        log_error "No se pudo autenticar con GitHub via SSH"
+        log_info "   Mensaje: $ssh_output"
+        if echo "$ssh_output" | grep -q "permission denied"; then
+            log_info "💡 La clave SSH no está agregada a GitHub"
+            echo "$MSG_SSH_ADD_KEY"
+        elif echo "$ssh_output" | grep -q "Host key verification failed"; then
+            log_info "💡 Es la primera vez que te conectas. Acepta la huella digital:"
+            log_info "   ssh -T git@github.com # y escribe 'yes'"
+        fi
         return 1
     fi
 }
@@ -46,6 +85,18 @@ check_token() {
         else
             log_error "Token inválido o expirado"
             return 1
+        fi
+    fi
+    return 1
+}
+# Verificar GitHub CLI como alternativa
+check_gh_cli() {
+    if command -v gh &> /dev/null; then
+        if gh auth status &> /dev/null; then
+            log_info "✅ GitHub CLI detectado y autenticado"
+            export USE_GH_CLI=true
+            export GIT_REMOTE_PREFIX="https://github.com/"
+            return 0
         fi
     fi
     return 1
@@ -76,19 +127,25 @@ setup_authentication() {
         log_success "Autenticación SSH configurada"
         return 0
     fi
-    # Prioridad 2: Token en variable de entorno
+    # Prioridad 2: GitHub CLI
+    if check_gh_cli; then
+        log_success "Autenticación con GitHub CLI configurada"
+        return 0
+    fi
+    # Prioridad 3: Token en variable de entorno
     if check_token; then
         log_success "Autenticación con token configurada"
         return 0
     fi
-    # Prioridad 3: Solicitar token interactivamente
+    # Prioridad 4: Solicitar token interactivamente
     echo ""
     log_warning "No se encontró autenticación válida"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "📌 Opciones:"
     echo "   1) Configurar SSH (recomendado)"
     echo "   2) Usar token (alternativa)"
-    echo "   3) Salir"
+    echo "   3) Usar GitHub CLI (gh)"
+    echo "   4) Salir"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     read -p "$MSG_SELECT_OPTION " auth_choice
@@ -98,11 +155,14 @@ setup_authentication() {
             echo "$MSG_SSH_HELP"
             echo "$MSG_SSH_ADD_KEY"
             echo ""
+            echo "🔧 Comando para probar SSH:"
+            echo "   ssh -T git@github.com"
+            echo ""
             read -p "¿Has configurado SSH? (s/n): " ssh_configured
             if [[ "$ssh_configured" =~ ^[Ss]$ ]]; then
                 setup_authentication  # Reintentar
             else
-                log_error "No se pudo configurar SSH. Usando token como alternativa."
+                log_info "Puedes configurar SSH ahora o usar token como alternativa."
                 prompt_for_token
             fi
             ;;
@@ -110,6 +170,17 @@ setup_authentication() {
             prompt_for_token
             ;;
         3)
+            if command -v gh &> /dev/null; then
+                log_info "Ejecutando 'gh auth login' para configurar..."
+                gh auth login
+                setup_authentication
+            else
+                log_error "GitHub CLI no está instalado"
+                log_info "Instálalo con: https://cli.github.com/"
+                prompt_for_token
+            fi
+            ;;
+        4)
             log_error "Autenticación requerida para continuar"
             exit 1
             ;;
@@ -125,6 +196,8 @@ get_remote_url() {
     local user="${GITHUB_USER:-$(git config user.name 2>/dev/null)}"
     if [ "${USE_SSH:-false}" = true ]; then
         echo "git@github.com:${user}/${repo_name}.git"
+    elif [ "${USE_GH_CLI:-false}" = true ]; then
+        echo "https://github.com/${user}/${repo_name}.git"
     else
         echo "https://github.com/${user}/${repo_name}.git"
     fi
@@ -132,5 +205,6 @@ get_remote_url() {
 # Exportar funciones
 export -f check_ssh
 export -f check_token
+export -f check_gh_cli
 export -f setup_authentication
 export -f get_remote_url
