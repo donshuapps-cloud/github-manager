@@ -1,0 +1,351 @@
+#!/usr/bin/env bash
+#===============================================================================
+# Módulo 2: Inicializar repositorio en proyecto existente
+#===============================================================================
+# Función para verificar si repositorio existe en GitHub
+check_repo_exists() {
+    local repo_name="$1"
+    local user="${GITHUB_USER:-donshuapps-cloud}"
+    if command -v gh &> /dev/null && gh auth status &> /dev/null; then
+        if gh repo view "$user/$repo_name" &> /dev/null; then
+            return 0
+        fi
+    fi
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        local response
+        response=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
+                        "https://api.github.com/repos/${user}/${repo_name}" 2>/dev/null)
+        if echo "$response" | grep -q '"id"'; then
+            return 0
+        fi
+    fi
+    return 1
+}
+# Función para verificar si hay historias no relacionadas
+check_unrelated_histories() {
+    local remote_name="${1:-origin}"
+    local remote_branch="${2:-main}"
+    git fetch "$remote_name" 2>/dev/null
+    if git rev-parse --verify "$remote_name/$remote_branch" &>/dev/null; then
+        local common_commit
+        common_commit=$(git merge-base HEAD "$remote_name/$remote_branch" 2>/dev/null)
+        if [ -z "$common_commit" ]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+# Función para vincular repositorio local con remoto existente
+link_existing_repo() {
+    local repo_name="$1"
+    local user="${GITHUB_USER:-donshuapps-cloud}"
+    local remote_url
+    if [ "${USE_SSH:-false}" = true ]; then
+        remote_url="git@github.com:${user}/${repo_name}.git"
+    else
+        remote_url="https://github.com/${user}/${repo_name}.git"
+    fi
+    log_info "Vinculando con repositorio existente: ${user}/${repo_name}"
+    # Verificar si ya existe remote
+    if git remote | grep -q origin; then
+        local current_url
+        current_url=$(git remote get-url origin 2>/dev/null)
+        if [ "$current_url" != "$remote_url" ]; then
+            git remote set-url origin "$remote_url"
+            log_info "Remote origin actualizado"
+        else
+            log_info "Remote origin ya está configurado correctamente"
+        fi
+    else
+        git remote add origin "$remote_url"
+        log_info "Remote origin agregado"
+    fi
+    # Verificar si hay historias no relacionadas
+    if check_unrelated_histories "origin" "main"; then
+        log_warning "El repositorio local y remoto tienen historias no relacionadas"
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "📌 ¿Cómo deseas proceder?"
+        echo "   1) Fusionar historias (git pull --allow-unrelated-histories)"
+        echo "   2) Sobrescribir remoto con contenido local (git push -f)"
+        echo "   3) Sobrescribir local con contenido remoto (git reset --hard)"
+        echo "   4) Cancelar"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        local history_choice
+        read -p "➤ Seleccione una opción [1-4]: " history_choice
+        case $history_choice in
+            1)
+                log_info "Fusionando historias no relacionadas..."
+                if git pull origin main --allow-unrelated-histories --no-edit 2>&1; then
+                    log_success "Historias fusionadas exitosamente"
+                    git push origin main 2>&1
+                    log_success "Cambios subidos a GitHub"
+                else
+                    log_error "Error al fusionar historias."
+                    echo ""
+                    echo "💡 Para resolver conflictos manualmente:"
+                    echo "   git status"
+                    echo "   # Editar archivos conflictivos"
+                    echo "   git add ."
+                    echo "   git commit -m 'Merge: resolver conflictos'"
+                    echo "   git push"
+                fi
+                ;;
+            2)
+                echo ""
+                read -p "⚠️  ¿Estás seguro de sobrescribir el repositorio remoto? (s/n): " confirm
+                if [[ "$confirm" =~ ^[Ss]$ ]]; then
+                    git push -f origin main 2>&1
+                    log_success "Repositorio remoto sobrescrito con contenido local"
+                else
+                    log_info "Operación cancelada"
+                fi
+                ;;
+            3)
+                echo ""
+                read -p "⚠️  ¿Estás seguro de sobrescribir el repositorio local? (s/n): " confirm
+                if [[ "$confirm" =~ ^[Ss]$ ]]; then
+                    git fetch origin
+                    git reset --hard origin/main
+                    log_success "Repositorio local sobrescrito con contenido remoto"
+                else
+                    log_info "Operación cancelada"
+                fi
+                ;;
+            4)
+                log_info "Operación cancelada"
+                return 1
+                ;;
+            *)
+                log_error "Opción inválida"
+                return 1
+                ;;
+        esac
+    else
+        # Historias relacionadas, hacer pull normal
+        log_info "Sincronizando con repositorio remoto..."
+        if git pull origin main --no-edit 2>/dev/null; then
+            log_success "Sincronización completada"
+        else
+            log_warning "No se pudo hacer pull automáticamente (puede que no haya cambios)"
+        fi
+        # Hacer push de cambios locales
+        local current_branch
+        current_branch=$(git branch --show-current 2>/dev/null || echo "main")
+        git push -u origin "$current_branch" 2>&1
+        log_success "Repositorio vinculado exitosamente"
+    fi
+    return 0
+}
+# Función para crear repositorio usando GitHub CLI
+create_repo_with_gh() {
+    local repo_name="$1"
+    local repo_desc="$2"
+    local is_private="$3"
+    local visibility="--public"
+    if [ "$is_private" = "true" ]; then
+        visibility="--private"
+    fi
+    log_info "Creando repositorio con GitHub CLI..."
+    if gh repo create "$repo_name" $visibility --description "$repo_desc" --source=. --remote=origin --push 2>&1; then
+        log_success "Repositorio creado y sincronizado con GitHub CLI"
+        return 0
+    else
+        if check_repo_exists "$repo_name"; then
+            log_warning "El repositorio '$repo_name' ya existe en GitHub"
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "📌 ¿Qué deseas hacer?"
+            echo "   1) Vincular con el repositorio existente"
+            echo "   2) Usar otro nombre"
+            echo "   3) Cancelar"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo ""
+            local exist_choice
+            read -p "➤ Seleccione una opción [1-3]: " exist_choice
+            case $exist_choice in
+                1)
+                    link_existing_repo "$repo_name"
+                    return 0
+                    ;;
+                2)
+                    echo ""
+                    read -p "📝 Nuevo nombre del repositorio: " new_name
+                    if [ -n "$new_name" ]; then
+                        create_repo_with_gh "$new_name" "$repo_desc" "$is_private"
+                        return $?
+                    fi
+                    ;;
+                3)
+                    log_info "Operación cancelada"
+                    return 1
+                    ;;
+                *)
+                    log_error "Opción inválida"
+                    return 1
+                    ;;
+            esac
+        else
+            log_error "Error al crear repositorio con GitHub CLI"
+            return 1
+        fi
+    fi
+}
+# Función para crear repositorio usando API con token
+create_repo_with_token() {
+    local repo_name="$1"
+    local repo_desc="$2"
+    local private_flag="$3"
+    log_info "Creando repositorio vía API con token..."
+    local response
+    local api_url="https://api.github.com/user/repos"
+    response=$(curl -s -X POST "$api_url" \
+        -H "Authorization: token ${GITHUB_TOKEN}" \
+        -H "Accept: application/vnd.github.v3+json" \
+        -d "{
+            \"name\": \"${repo_name}\",
+            \"description\": \"${repo_desc}\",
+            \"private\": ${private_flag},
+            \"auto_init\": false
+        }")
+    if echo "$response" | grep -q '"html_url"'; then
+        local repo_url
+        repo_url=$(echo "$response" | grep -o '"html_url":"[^"]*"' | cut -d'"' -f4)
+        log_success "$MSG_REPO_CREATED"
+        log_info "$MSG_REPO_URL $repo_url"
+        local remote_url
+        if [ "${USE_SSH:-false}" = true ]; then
+            remote_url="git@github.com:${GITHUB_USER}/${repo_name}.git"
+        else
+            remote_url="https://github.com/${GITHUB_USER}/${repo_name}.git"
+        fi
+        if git remote | grep -q origin; then
+            git remote set-url origin "$remote_url"
+        else
+            git remote add origin "$remote_url"
+        fi
+        local current_branch
+        current_branch=$(git branch --show-current 2>/dev/null || echo "main")
+        git push -u origin "$current_branch"
+        return 0
+    else
+        log_error "$MSG_REPO_CREATE_FAIL"
+        return 1
+    fi
+}
+repo_init() {
+    echo ""
+    echo "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo "📁 INICIALIZAR REPOSITORIO EN PROYECTO EXISTENTE"
+    echo "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    local project_path
+    echo ""
+    read -p "$MSG_INIT_REPO_PATH " project_path
+    if [ -z "$project_path" ]; then
+        project_path="$(pwd)"
+    fi
+    if [ ! -d "$project_path" ]; then
+        log_error "La ruta no existe: $project_path"
+        return 1
+    fi
+    cd "$project_path" || return 1
+    log_info "Directorio actual: $(pwd)"
+    if [ -d ".git" ]; then
+        log_warning "$MSG_REPO_ALREADY_INIT"
+        if git remote -v | grep -q origin; then
+            log_info "Remote origin actual:"
+            git remote -v
+        fi
+        echo ""
+        read -p "¿Deseas continuar y configurar GitHub? (s/n): " continue_init
+        if [[ ! "$continue_init" =~ ^[Ss]$ ]]; then
+            return 0
+        fi
+    else
+        log_info "$MSG_INIT_GIT"
+        git init
+        log_success "Git inicializado"
+    fi
+    echo ""
+    read -p "$MSG_REPO_NAME " repo_name
+    while [ -z "$repo_name" ]; do
+        log_error "$MSG_VALIDATE_NAME"
+        read -p "$MSG_REPO_NAME " repo_name
+    done
+    read -p "$MSG_REPO_DESC " repo_desc
+    local private_flag="false"
+    while true; do
+        echo ""
+        read -p "$MSG_REPO_PRIVATE " is_private_input
+        if [[ "$is_private_input" =~ ^[Ss]$ ]] || [[ "$is_private_input" =~ ^[Yy]$ ]]; then
+            private_flag="true"
+            break
+        elif [[ "$is_private_input" =~ ^[Nn]$ ]] || [ -z "$is_private_input" ]; then
+            private_flag="false"
+            break
+        else
+            log_error "$MSG_VALIDATE_YES_NO"
+        fi
+    done
+    echo ""
+    # Verificar si el repositorio ya existe
+    if check_repo_exists "$repo_name"; then
+        log_warning "El repositorio '$repo_name' ya existe en GitHub"
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "📌 ¿Qué deseas hacer?"
+        echo "   1) Vincular con el repositorio existente (recomendado)"
+        echo "   2) Crear uno nuevo (necesitarás otro nombre)"
+        echo "   3) Cancelar"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        local exist_choice
+        read -p "➤ Seleccione una opción [1-3]: " exist_choice
+        case $exist_choice in
+            1)
+                link_existing_repo "$repo_name"
+                return $?
+                ;;
+            2)
+                echo ""
+                read -p "📝 Nuevo nombre del repositorio: " repo_name
+                if [ -z "$repo_name" ]; then
+                    log_error "Nombre no proporcionado"
+                    return 1
+                fi
+                ;;
+            3)
+                log_info "Operación cancelada"
+                return 0
+                ;;
+            *)
+                log_error "Opción inválida"
+                return 1
+                ;;
+        esac
+    fi
+    # Si llegamos aquí, el repositorio no existe, proceder a crear
+    local use_gh=false
+    local use_token=false
+    if command -v gh &> /dev/null; then
+        if gh auth status &> /dev/null; then
+            use_gh=true
+            log_success "✅ GitHub CLI autenticado correctamente"
+        fi
+    fi
+    if [ "$use_gh" = false ] && [ -n "${GITHUB_TOKEN:-}" ]; then
+        use_token=true
+        log_success "✅ Token de GitHub detectado"
+    fi
+    if [ "$use_gh" = false ] && [ "$use_token" = false ]; then
+        log_error "No se encontró autenticación válida"
+        return 1
+    fi
+    if [ "$use_gh" = true ]; then
+        create_repo_with_gh "$repo_name" "$repo_desc" "$private_flag"
+    else
+        create_repo_with_token "$repo_name" "$repo_desc" "$private_flag"
+    fi
+}
+export -f repo_init
