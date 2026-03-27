@@ -2,6 +2,12 @@
 #===============================================================================
 # Módulo 13: Generar documentación automática
 #===============================================================================
+# Variables globales para el módulo
+PROJECT_NAME=""
+PROJECT_VERSION=""
+PROJECT_DESC=""
+PROJECT_AUTHOR=""
+PROJECT_LICENSE=""
 # Función para detectar información del proyecto
 detect_project_info() {
     local name=""
@@ -34,6 +40,12 @@ detect_project_info() {
         version=$(grep -o 'version[[:space:]]*=[[:space:]]*"[^"]*"' Cargo.toml | head -1 | cut -d'"' -f2)
         description=$(grep -o 'description[[:space:]]*=[[:space:]]*"[^"]*"' Cargo.toml | head -1 | cut -d'"' -f2)
     fi
+    # Buscar en go.mod (Go)
+    if [ -f "go.mod" ] && [ -z "$name" ]; then
+        name=$(grep -o 'module[[:space:]]*[^[:space:]]*' go.mod | head -1 | cut -d' ' -f2 | sed 's|.*/||')
+        # Intento de obtener versión desde git tag
+        version=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+    fi
     # Si no hay nombre, usar el nombre del directorio
     if [ -z "$name" ]; then
         name=$(basename "$(pwd)")
@@ -42,7 +54,20 @@ detect_project_info() {
     if [ -z "$description" ]; then
         description="Proyecto desarrollado con GitHub Repository Manager"
     fi
-    echo "$name|$version|$description|$author|$license"
+    # Si no hay autor, usar valor por defecto
+    if [ -z "$author" ]; then
+        author="${GITHUB_USER:-Donshu}"
+    fi
+    # Si no hay licencia, usar MIT por defecto
+    if [ -z "$license" ]; then
+        license="MIT"
+    fi
+    # Asignar a variables globales
+    PROJECT_NAME="$name"
+    PROJECT_VERSION="$version"
+    PROJECT_DESC="$description"
+    PROJECT_AUTHOR="$author"
+    PROJECT_LICENSE="$license"
 }
 # Función para detectar tecnologías
 detect_technologies() {
@@ -58,10 +83,13 @@ detect_technologies() {
     [ -f "build.gradle" ] && techs+=("Java/Gradle")
     [ -f "Dockerfile" ] && techs+=("Docker")
     [ -f "docker-compose.yml" ] && techs+=("Docker Compose")
-    [ -f ".github/workflows/*.yml" ] 2>/dev/null && techs+=("GitHub Actions")
+    # Detectar workflows de GitHub Actions
+    if compgen -G ".github/workflows/*.yml" > /dev/null 2>&1; then
+        techs+=("GitHub Actions")
+    fi
     [ -f "Makefile" ] && techs+=("Make")
     [ -f "README.md" ] && techs+=("Documentation")
-    # Detectar frameworks
+    # Detectar frameworks frontend
     if [ -f "package.json" ]; then
         if grep -q '"react"' package.json 2>/dev/null; then
             techs+=("React")
@@ -76,18 +104,20 @@ detect_technologies() {
             techs+=("Next.js")
         fi
     fi
-    if [ -z "${techs[*]}" ]; then
-        techs+=("Shell Script")
+    if [ ${#techs[@]} -eq 0 ]; then
+        techs+=("Shell Script / Bash")
     fi
     echo "${techs[@]}"
 }
 # Función para listar estructura de directorios
 list_directory_structure() {
-    local max_depth=3
-    local max_items=20
     echo '```'
-    tree -L "$max_depth" -I 'node_modules|.git|__pycache__|*.pyc' --dirsfirst 2>/dev/null || \
-    find . -maxdepth "$max_depth" -not -path "*/\.*" -not -path "*/node_modules/*" -not -path "*/__pycache__/*" | head -"$max_items" | sort
+    if command -v tree &> /dev/null; then
+        tree -L 2 -I 'node_modules|.git|__pycache__|*.pyc' --dirsfirst 2>/dev/null || \
+        find . -maxdepth 2 -not -path "*/\.*" -not -path "*/node_modules/*" -not -path "*/__pycache__/*" | head -30 | sort
+    else
+        find . -maxdepth 2 -not -path "*/\.*" -not -path "*/node_modules/*" -not -path "*/__pycache__/*" | head -30 | sort
+    fi
     echo '```'
 }
 # Función para generar badges
@@ -95,10 +125,14 @@ generate_badges() {
     local repo_path="$1"
     local badges=""
     # Badge de versión
-    badges+="![Version](https://img.shields.io/badge/version-${VERSION:-1.0.0}-blue.svg)\n"
+    if [ -n "$PROJECT_VERSION" ]; then
+        badges+="![Version](https://img.shields.io/badge/version-${PROJECT_VERSION}-blue.svg)\n"
+    else
+        badges+="![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)\n"
+    fi
     # Badge de licencia
-    if [ -n "$LICENSE" ]; then
-        badges+="![License](https://img.shields.io/badge/license-${LICENSE}-green.svg)\n"
+    if [ -n "$PROJECT_LICENSE" ]; then
+        badges+="![License](https://img.shields.io/badge/license-${PROJECT_LICENSE}-green.svg)\n"
     fi
     # Badge de lenguaje principal
     if [ -n "$GITHUB_TOKEN" ] && [ -n "$repo_path" ]; then
@@ -115,41 +149,27 @@ generate_badges() {
     if [ -d ".github/workflows" ]; then
         badges+="![GitHub Actions](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-blue.svg)\n"
     fi
-    # Badge de GitHub Pages
-    if [ -n "$GITHUB_TOKEN" ] && [ -n "$repo_path" ]; then
-        local pages_response
-        pages_response=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
-                        "https://api.github.com/repos/${repo_path}/pages" 2>/dev/null)
-        if echo "$pages_response" | grep -q '"html_url"'; then
-            badges+="![GitHub Pages](https://img.shields.io/badge/GitHub%20Pages-active-brightgreen.svg)\n"
-        fi
-    fi
     echo -e "$badges"
 }
-# Función para generar instalación y uso
-generate_installation_usage() {
-    local techs=("$@")
-    local install_section=""
-    local usage_section=""
-    # Detectar tipo de proyecto para comandos específicos
-    if [[ " ${techs[*]} " =~ "Node.js" ]]; then
-        install_section="\`\`\`bash\nnpm install\n\`\`\`\n"
-        usage_section="\`\`\`bash\nnpm start\n\`\`\`\n"
-    elif [[ " ${techs[*]} " =~ "Python" ]]; then
-        install_section="\`\`\`bash\npip install -r requirements.txt\n\`\`\`\n"
-        usage_section="\`\`\`bash\npython main.py\n\`\`\`\n"
-    elif [[ " ${techs[*]} " =~ "Rust" ]]; then
-        install_section="\`\`\`bash\ncargo build --release\n\`\`\`\n"
-        usage_section="\`\`\`bash\n./target/release/${PROJECT_NAME}\n\`\`\`\n"
-    elif [[ " ${techs[*]} " =~ "Go" ]]; then
-        install_section="\`\`\`bash\ngo mod download\ngo build\n\`\`\`\n"
-        usage_section="\`\`\`bash\n./${PROJECT_NAME}\n\`\`\`\n"
-    else
-        install_section="\`\`\`bash\ngit clone https://github.com/${GITHUB_USER:-usuario}/${PROJECT_NAME}.git\ncd ${PROJECT_NAME}\n\`\`\`\n"
-        usage_section="\`\`\`bash\n./github-manager.sh\n\`\`\`\n"
-    fi
-    echo "## Instalación\n\n$install_section"
-    echo "## Uso\n\n$usage_section"
+# Función para generar features list
+generate_features_list() {
+    cat << 'EOF'
+| Módulo | Descripción |
+|--------|-------------|
+| 🔧 Crear repositorio | Crear nuevo repositorio desde cero en GitHub |
+| 📁 Inicializar | Inicializar repositorio en proyecto existente |
+| 📤 Subir cambios | Push con auto-descripción de commits |
+| 📦 Clonar | Clonar repositorios existentes |
+| 📊 Estado | Ver estado detallado del repositorio |
+| 🌿 Ramas | Gestionar branches (crear, cambiar, fusionar, eliminar) |
+| 🏷️ Tags | Gestionar tags y releases |
+| 🌐 GitHub Pages | Configurar GitHub Pages automáticamente |
+| ⚙️ GitHub Actions | Configurar workflows CI/CD |
+| 📜 Historial | Ver historial de commits con múltiples formatos |
+| 📄 .gitignore | Configurar .gitignore personalizado e inteligente |
+| 🗑️ Eliminar | Eliminar repositorio local con seguridad |
+| 📚 Documentación | Generar documentación automática |
+EOF
 }
 # Función para generar README en español
 generate_readme_es() {
@@ -172,7 +192,10 @@ $(printf '• %s\n' "${techs[@]}")
 ## 📁 Estructura del Proyecto
 $(list_directory_structure)
 ## 📦 Instalación
-$(generate_installation_usage "${techs[@]}")
+\`\`\`bash
+git clone https://github.com/${GITHUB_USER:-usuario}/${project_name}.git
+cd ${project_name}
+\`\`\`
 ## 🔧 Configuración
 ### Variables de Entorno
 | Variable | Descripción | Por Defecto |
@@ -206,31 +229,8 @@ Este proyecto está bajo la licencia ${license:-MIT}. Consulta el archivo \`LICE
 **${author:-Donshu}**
 - GitHub: [${GITHUB_USER:-donshuapps-cloud}](https://github.com/${GITHUB_USER:-donshuapps-cloud})
 - Email: ${GITHUB_EMAIL:-donshu.apps@gmail.com}
-## 🙏 Agradecimientos
-- GitHub por proporcionar la plataforma
-- Comunidad de código abierto
 ---
 _Generado automáticamente con [GitHub Repository Manager](https://github.com/${GITHUB_USER:-donshuapps-cloud}/github-manager)_
-EOF
-}
-# Función para generar features list
-generate_features_list() {
-    cat << 'EOF'
-| Módulo | Descripción |
-|--------|-------------|
-| 🔧 Crear repositorio | Crear nuevo repositorio desde cero en GitHub |
-| 📁 Inicializar | Inicializar repositorio en proyecto existente |
-| 📤 Subir cambios | Push con auto-descripción de commits |
-| 📦 Clonar | Clonar repositorios existentes |
-| 📊 Estado | Ver estado detallado del repositorio |
-| 🌿 Ramas | Gestionar branches (crear, cambiar, fusionar, eliminar) |
-| 🏷️ Tags | Gestionar tags y releases |
-| 🌐 GitHub Pages | Configurar GitHub Pages automáticamente |
-| ⚙️ GitHub Actions | Configurar workflows CI/CD |
-| 📜 Historial | Ver historial de commits con múltiples formatos |
-| 📄 .gitignore | Configurar .gitignore personalizado e inteligente |
-| 🗑️ Eliminar | Eliminar repositorio local con seguridad |
-| 📚 Documentación | Generar documentación automática |
 EOF
 }
 # Función para generar README en inglés
@@ -254,7 +254,10 @@ $(printf '• %s\n' "${techs[@]}")
 ## 📁 Project Structure
 $(list_directory_structure)
 ## 📦 Installation
-$(generate_installation_usage "${techs[@]}")
+\`\`\`bash
+git clone https://github.com/${GITHUB_USER:-usuario}/${project_name}.git
+cd ${project_name}
+\`\`\`
 ## 🔧 Configuration
 ### Environment Variables
 | Variable | Description | Default |
@@ -288,9 +291,6 @@ This project is licensed under the ${license:-MIT} License. See the \`LICENSE\` 
 **${author:-Donshu}**
 - GitHub: [${GITHUB_USER:-donshuapps-cloud}](https://github.com/${GITHUB_USER:-donshuapps-cloud})
 - Email: ${GITHUB_EMAIL:-donshu.apps@gmail.com}
-## 🙏 Acknowledgments
-- GitHub for providing the platform
-- Open source community
 ---
 _Automatically generated with [GitHub Repository Manager](https://github.com/${GITHUB_USER:-donshuapps-cloud}/github-manager)_
 EOF
@@ -298,11 +298,15 @@ EOF
 # Función para generar archivo LICENSE
 generate_license() {
     local license_type="${1:-MIT}"
+    local year
+    year=$(date +%Y)
+    local author="${PROJECT_AUTHOR:-Donshu}"
+    local email="${GITHUB_EMAIL:-donshu.apps@gmail.com}"
     case $license_type in
         MIT)
-            cat << 'EOF'
+            cat << EOF
 MIT License
-Copyright (c) $(date +%Y) Donshu (donshu.apps@gmail.com)
+Copyright (c) ${year} ${author} (${email})
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
@@ -318,21 +322,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-EOF
-            ;;
-        GPL-3.0)
-            cat << 'EOF'
-                    GNU GENERAL PUBLIC LICENSE
-                       Version 3, 29 June 2007
-...
-EOF
-            ;;
-        Apache-2.0)
-            cat << 'EOF'
-                                 Apache License
-                           Version 2.0, January 2004
-                        http://www.apache.org/licenses/
-...
 EOF
             ;;
         *)
@@ -352,11 +341,9 @@ repo_docs() {
         log_info "Ejecuta la opción 1 o 2 primero para inicializar un repositorio"
         return 1
     fi
-    # Obtener información del proyecto
-    local project_info
-    project_info=$(detect_project_info)
-    IFS='|' read -r PROJECT_NAME PROJECT_VERSION PROJECT_DESC PROJECT_AUTHOR PROJECT_LICENSE <<< "$project_info"
-    # Obtener tecnologías detectadas
+    # Detectar información del proyecto
+    detect_project_info
+    # Detectar tecnologías
     local technologies
     technologies=($(detect_technologies))
     # Obtener remote info
@@ -443,10 +430,6 @@ All notable changes to this project will be documented in this file.
 ### Added
 - Initial documentation generation
 - GitHub Repository Manager integration
-### Changed
-- N/A
-### Fixed
-- N/A
 ## [${PROJECT_VERSION:-1.0.0}] - $(date +%Y-%m-%d)
 ### Added
 - Initial release
@@ -457,10 +440,13 @@ EOF
             log_success "CHANGELOG.md generado"
             ;;
         7)
+            # Generar README.md
             generate_readme_es "$PROJECT_NAME" "$PROJECT_VERSION" "$PROJECT_DESC" "$PROJECT_AUTHOR" "$PROJECT_LICENSE" "$repo_path" "${technologies[@]}" > README.md
             log_success "README.md generado"
+            # Generar LICENSE
             generate_license "MIT" > LICENSE
             log_success "LICENSE generado"
+            # Generar CONTRIBUTING.md
             cat > CONTRIBUTING.md << 'EOF'
 # Contributing to this project
 We love your input! We want to make contributing to this project as easy and transparent as possible.
@@ -482,6 +468,7 @@ We love your input! We want to make contributing to this project as easy and tra
 By contributing, you agree that your contributions will be licensed under the same license as the project.
 EOF
             log_success "CONTRIBUTING.md generado"
+            # Generar CHANGELOG.md
             cat > CHANGELOG.md << EOF
 # Changelog
 All notable changes to this project will be documented in this file.
